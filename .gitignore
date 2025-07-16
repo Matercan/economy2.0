@@ -1,0 +1,30 @@
+# Binaries for the project
+[Bb]in/
+[Oo]bj/
+
+# Visual Studio temporary files
+.vs/
+
+# NuGet packages
+*.nupkg
+# The packages folder (if you're using packages.config, though modern .NET uses obj/project.assets.json)
+packages/
+
+# Other common generated files
+*.user
+*.suo
+*.pdb
+*.log
+*.tmp
+*.bak
+*.scc
+
+# Rider IDE files (if you or collaborators use Rider)
+.idea/
+*.iml
+
+# VS Code files (if you or collaborators use VS Code)
+.vscode/
+
+# neovim
+*.swp

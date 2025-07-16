@@ -14,6 +14,31 @@ public class DatabaseManager
        daily,
        extra
     }
+    
+    public struct Item 
+    {
+        // Use properties (PascalCase)
+        public int ItemId { get; set; }
+        public string ItemName { get; set; }
+        public long Price { get; set; }
+        public bool OneTime { get; set; }
+        public bool InInventory { get; set; }
+        public string? Command { get; set; } 
+        public int? IncomeSourceId { get; set; } 
+
+        // Constructor to ensure all fields are initialized
+        public Item(int itemId, string itemName, long price, bool oneTime, bool inInventory, string? command, int? incomeSourceId)
+        {
+            ItemId = itemId;
+            ItemName = itemName;
+            Price = price;
+            OneTime = oneTime;
+            InInventory = inInventory;
+            Command = command;
+            IncomeSourceId = incomeSourceId;
+        }
+    }
+                
 
     public DatabaseManager()
     {
@@ -254,8 +279,6 @@ public class DatabaseManager
 
     public async Task<bool> AddCashToUserAsync(string discordUserId, string serverId, long amount, TransactionType cause, string description)
     {
-
-
         using (MySqlConnection connection = new MySqlConnection(connectionString))
         {
             await connection.OpenAsync();
@@ -381,38 +404,34 @@ public class DatabaseManager
 
     }
 
-    public async Task<bool> InitializeItem(bool oneTime, string itemName, long price, bool inInventory, int incomeSourceId = -1, string command = "")
+    public async Task<bool> InitializeItem(
+        bool oneTime,
+        string itemName,
+        long price,
+        bool inInventory,
+        int incomeSourceId = -1,
+        string command = "")
     {
         using (MySqlConnection connection = new MySqlConnection(connectionString))
         {
             try
             {
                 await connection.OpenAsync();
-                // Corrected SQL: You're missing @userId and @serverId parameters in the VALUES clause,
-                // and 'price' and 'inInventory' should also be parameters.
-                // Assuming 'inventories' table has server_id and user_id columns.
-                // Assuming 'price' and 'in_inventory' columns exist and are handled by parameters.
-                string insertSql = "INSERT INTO inventories (server_id, one_time, income_source_id, command, item_name, user_id, price, in_inventory) VALUES (@serverId, @oneTime, @incomeSourceId, @command, @itemName, @userId, @price, @inInventory)";
+
+                // CORRECTED SQL: Fixed typo in 'in_inventory' column name.
+                // Also, ensure 'item_id' is NOT in the column list if it's AUTO_INCREMENT.
+                string insertSql = "INSERT INTO master_items (one_time, income_source_id, command, item_name, price, in_inventory) " +
+                                   "VALUES (@oneTime, @incomeSourceId, @command, @itemName, @price, @inInventory)";
 
                 using (MySqlCommand cmd = new MySqlCommand(insertSql, connection))
                 {
-                    // Always add all parameters that are specified in the SQL VALUES clause.
-                    // If a value should be NULL in the DB, pass DBNull.Value.
-                    cmd.Parameters.AddWithValue("@serverId", "1"); 
-                    cmd.Parameters.AddWithValue("@oneTime", oneTime);
+                    // Add all parameters corresponding to the SQL statement
                     cmd.Parameters.AddWithValue("@itemName", itemName);
-                    int userId = await GetDatabaseUserIdFromDiscordUserId("1", "1"); // Assuming "1" is the discord_user_id and "1" is the server_id for the user you want
-                    if (userId == -1)
-                    {
-                        Console.WriteLine("Error: Could not find database user ID for the provided Discord user/server. Cannot initialize item.");
-                        return false; // Or throw an exception
-                    }
-                    cmd.Parameters.AddWithValue("@userId", userId);
                     cmd.Parameters.AddWithValue("@price", price);
                     cmd.Parameters.AddWithValue("@inInventory", inInventory);
+                    cmd.Parameters.AddWithValue("@oneTime", oneTime);
 
-                    // Handle incomeSourceId: if it's -1 (your default), pass DBNull.Value
-                    // Otherwise, pass the integer value.
+                    // Handle nullable incomeSourceId: if it's -1 (your default for null), pass DBNull.Value
                     if (incomeSourceId == -1)
                     {
                         cmd.Parameters.AddWithValue("@incomeSourceId", DBNull.Value);
@@ -422,9 +441,8 @@ public class DatabaseManager
                         cmd.Parameters.AddWithValue("@incomeSourceId", incomeSourceId);
                     }
 
-                    // Always add the @command parameter. If the C# 'command' string is empty,
-                    // pass DBNull.Value to insert NULL into the database.
-                    if (string.IsNullOrEmpty(command)) // Use string.IsNullOrEmpty for robustness
+                    // Handle nullable command: if the C# 'command' string is null or empty, pass DBNull.Value
+                    if (string.IsNullOrEmpty(command))
                     {
                         cmd.Parameters.AddWithValue("@command", DBNull.Value);
                     }
@@ -436,13 +454,164 @@ public class DatabaseManager
                     int rowsAffected = await cmd.ExecuteNonQueryAsync();
                     return rowsAffected > 0;
                 }
-
             }
             catch (MySqlException ex)
             {
-                Console.WriteLine($"Error initializing item: {ex.Message}"); // Changed error message for clarity
+                Console.WriteLine($"Error initializing item: {ex.Message}");
                 Console.WriteLine(ex.ToString());
                 return false;
+            }
+        }
+    }
+
+
+    public async Task<bool> AddItemToUser(int userId, int masterItemId, string serverId) // Renamed for clarity
+    {
+        using (MySqlConnection connection = new MySqlConnection(connectionString))
+        {
+            try
+            {
+                await connection.OpenAsync();
+
+                // 1. Fetch the master item details
+                //
+                
+                if (masterItemId == -1)
+                {
+                    Console.WriteLine($"Error: Item '{masterItemId}' not found in master list. Cannot add to inventory.");
+                    return false;
+                }
+
+                Item itemDetails = await ReadItem(masterItemId);
+                if (itemDetails.ItemId == 0)
+                {
+                    Console.WriteLine($"Error: Master Item with ID {masterItemId} not found. Cannot add to inventory.");
+                    return false;
+                }
+
+                // 2. Prepare the INSERT statement for the 'inventories' table
+                string insertSql = "INSERT INTO inventories (server_id, one_time, income_source_id, command, item_name, user_id, price, in_inventory, master_item_id) " +
+                                   "VALUES (@serverId, @oneTime, @incomeSourceId, @command, @itemName, @userId, @price, @inInventory, @masterItemId)";
+
+                using (MySqlCommand cmd = new MySqlCommand(insertSql, connection))
+                {
+                    // Parameters for the SQL query
+                    cmd.Parameters.AddWithValue("@serverId", serverId);
+                    cmd.Parameters.AddWithValue("@userId", userId);
+                    cmd.Parameters.AddWithValue("@masterItemId", masterItemId); // The ID from your master item list
+
+                    // Use properties from the fetched itemDetails object (PascalCase)
+                    cmd.Parameters.AddWithValue("@oneTime", itemDetails.OneTime);
+                    cmd.Parameters.AddWithValue("@itemName", itemDetails.ItemName);
+                    cmd.Parameters.AddWithValue("@price", itemDetails.Price);
+                    cmd.Parameters.AddWithValue("@inInventory", itemDetails.InInventory); // Consider if this should always be true for a newly added item
+
+                    // Handle nullable IncomeSourceId
+                    cmd.Parameters.AddWithValue("@incomeSourceId", itemDetails.IncomeSourceId.HasValue ? itemDetails.IncomeSourceId.Value : DBNull.Value);
+
+                    // Handle nullable Command
+                    cmd.Parameters.AddWithValue("@command", string.IsNullOrEmpty(itemDetails.Command) ? DBNull.Value : (object)itemDetails.Command);
+
+                    int rowsAffected = await cmd.ExecuteNonQueryAsync();
+                    return rowsAffected > 0;
+                }
+            }
+            catch (MySqlException ex)
+            {
+                Console.WriteLine($"Error when adding item {masterItemId} to user {userId} of {serverId}'s inventory: {ex.Message}");
+                Console.WriteLine(ex.ToString());
+                return false;
+            }
+        }
+    }
+
+    public async Task<Item> ReadItem(int itemId) // Return Item? to indicate it might be null
+    {
+        using (MySqlConnection connection = new MySqlConnection(connectionString))
+        {
+            try
+            {
+                await connection.OpenAsync();
+                // CORRECTED SQL: Added 'item_id' to the SELECT list
+                string sql = "SELECT item_id, price, one_time, in_inventory, item_name, income_source_id, command FROM master_items WHERE item_id = @itemId";
+                using (MySqlCommand cmd = new MySqlCommand(sql, connection))
+                {
+                    cmd.Parameters.AddWithValue("@itemId", itemId);
+
+                    using (MySqlDataReader reader = (MySqlDataReader)await cmd.ExecuteReaderAsync())
+                    {
+                        if (reader.Read())
+                        {
+                            // Safely read nullable columns
+                            string? command;
+                            int commandDatabaseIndex = 6; // 7 is the index of command on the database, so we need to subtract 1 from it
+                            if ( reader.IsDBNull(commandDatabaseIndex) ) { command = String.Empty; }
+                            else { command = reader.GetString("command"); }
+
+                            int? incomeSourceId;
+                            int incomeSourceIdDatabseIndex = 5; // 6 is the index of income_source_id in the database, so we need to subtract 1 from it
+                            if ( reader.IsDBNull(incomeSourceIdDatabseIndex) ) { incomeSourceId = null; }
+                            else { incomeSourceId = reader.GetInt32("income_source_Id"); }
+
+                            // Use the constructor to properly initialize the struct
+                            return new Item(
+                                itemId: reader.GetInt32("item_id"), // Now safe to read
+                                itemName: reader.GetString("item_name"),
+                                price: reader.GetInt64("price"),
+                                oneTime: reader.GetBoolean("one_time"),
+                                inInventory: reader.GetBoolean("in_inventory"),
+                                command: command,
+                                incomeSourceId: incomeSourceId
+                            );
+                        }
+                        else
+                        {
+                            Console.WriteLine($"Item with ID {itemId} not found in master_items.");
+                            return new Item();
+                        }
+                    }
+                }
+            }
+            catch (MySqlException ex)
+            {
+                Console.WriteLine($"Error reading item {itemId} from master_items: {ex.Message}");
+                Console.WriteLine(ex.ToString());
+                return new Item();
+            }
+        }
+    }
+
+    public async Task<int> GetMasterIndexFromItemName(string itemName)
+    {
+        using (MySqlConnection connection = new MySqlConnection(connectionString))
+        {
+            try
+            {
+                await connection.OpenAsync();
+                // CORRECTED: Select item_id from your master items table (e.g., 'items_master')
+                string sql = "SELECT item_id FROM master_items WHERE item_name = @itemName";
+
+                using (MySqlCommand cmd = new MySqlCommand(sql, connection))
+                {
+                    cmd.Parameters.AddWithValue("@itemName", itemName);
+                    // Using ExecuteScalarAsync is more efficient for single value retrieval
+                    object result = await cmd.ExecuteScalarAsync();
+
+                    if (result != null && result != DBNull.Value)
+                    {
+                        return Convert.ToInt32(result); // CORRECTED: Convert the result of master_item_id
+                    }
+                    else
+                    {
+                        return -1; // Item not found
+                    }
+                }
+            }
+            catch (MySqlException ex)
+            {
+                Console.WriteLine($"Error retrieving master item ID for '{itemName}': {ex.Message}");
+                Console.WriteLine(ex.ToString());
+                return -1;
             }
         }
     }
@@ -476,6 +645,8 @@ namespace economyBot
 
             // Items
             await dbManager.InitializeItem(true, "test", 500, false);
+            int itemIndex = await dbManager.GetMasterIndexFromItemName("test");
+            await dbManager.AddItemToUser(await dbManager.GetDatabaseUserIdFromDiscordUserId("1234", "1234"), itemIndex, "1234");
         }
     }
 }
