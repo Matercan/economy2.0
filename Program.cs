@@ -581,6 +581,66 @@ public class DatabaseManager
         }
     }
 
+    public async Task<bool> ClearDatabaseForTestingAsync(bool resetAutoIncrement = true)
+    {
+        // Define the order of tables to clear based on foreign key dependencies
+        // Child tables first, then parent tables.
+        List<string> tablesToClear = new List<string>
+        {
+            "inventories",   // References users, master_items
+            "transactions",  // References users, servers
+            "users",         // References servers
+            "master_items",  // No outgoing FKs to these tables
+            "servers",        // No outgoing FKs to these tables
+            "incomes"
+        };
+
+        using (MySqlConnection connection = new MySqlConnection(connectionString))
+        {
+            await connection.OpenAsync();
+            MySqlTransaction transaction = null;
+
+            try
+            {
+                transaction = connection.BeginTransaction();
+                Console.WriteLine("\n--- Clearing Database for Testing ---");
+
+                foreach (string tableName in tablesToClear)
+                {
+                    string deleteSql = $"DELETE FROM `{tableName}`"; // Use backticks for table names
+                    Console.WriteLine($"Deleting from table: {tableName}...");
+                    using (MySqlCommand cmd = new MySqlCommand(deleteSql, connection, transaction))
+                    {
+                        await cmd.ExecuteNonQueryAsync();
+                    }
+
+                    if (resetAutoIncrement)
+                    {
+                        // Reset AUTO_INCREMENT for tables that have one
+                        // This is a separate command, often executed after DELETE
+                        string resetAutoIncrementSql = $"ALTER TABLE `{tableName}` AUTO_INCREMENT = 1";
+                        Console.WriteLine($"Resetting AUTO_INCREMENT for {tableName}...");
+                        using (MySqlCommand cmd = new MySqlCommand(resetAutoIncrementSql, connection, transaction))
+                        {
+                            await cmd.ExecuteNonQueryAsync();
+                        }
+                    }
+                }
+
+                transaction.Commit();
+                Console.WriteLine("Database cleared successfully for testing!");
+                return true;
+            }
+            catch (MySqlException ex)
+            {
+                Console.WriteLine($"Error clearing database: {ex.Message}");
+                Console.WriteLine(ex.ToString());
+                transaction?.Rollback(); // Rollback all changes on error
+                return false;
+            }
+        }
+    }
+
     public async Task<int> GetMasterIndexFromItemName(string itemName)
     {
         using (MySqlConnection connection = new MySqlConnection(connectionString))
@@ -627,7 +687,9 @@ namespace economyBot
             // Start the database
             Console.WriteLine("Starting economyBot...");
             DatabaseManager dbManager = new DatabaseManager();
-            
+            await dbManager.ClearDatabaseForTestingAsync();
+            Console.WriteLine("------ TESTING BEGIN ------");
+
             // Ensure global economy and user are set up
             await dbManager.InsertServerAsync("1", "Global Economy");
             await dbManager.InsertUserAsync("1", "1", "Global User");
