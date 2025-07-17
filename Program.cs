@@ -1,15 +1,19 @@
 ﻿using MySql.Data.MySqlClient;
-using System;
 using System.Data;
-using System.Threading.Tasks;
-using System.Collections.Generic;
 using System.Diagnostics; // For Stopwatch
+using System.Collections.Concurrent; // For thread-safe dictionary
 
 
 public class DatabaseManager : IDisposable
 {
     private readonly string connectionString;
     private MySqlConnection _serverConnection;
+    
+    // Cache for Discord User Id to Internal  Database User #ID
+        
+    private readonly ConcurrentDictionary<(string DiscordUserId, string ServerId), int> _userIdCache = new();
+    private readonly ConcurrentDictionary<string, int> _masterItemIdCache = new();
+    private readonly ConcurrentDictionary<string, int> _masterIncomeIdCache = new();
 
     public enum TransactionType
     {
@@ -342,6 +346,13 @@ public class DatabaseManager : IDisposable
     public async Task<int> GetDatabaseUserIdFromDiscordUserId(string discordUserId, string serverId)
     {
         EnsureConnectionOpen(); 
+        
+        if (_userIdCache.TryGetValue((discordUserId, serverId), out int cachedUserId)) // Check cache before quering the database
+        {
+            return cachedUserId;
+        }
+
+        // If not found in cache, query the database
         try
         {
             string sql = "SELECT id FROM users WHERE discord_user_id = @discordUserId AND server_id = @serverId";
@@ -353,7 +364,9 @@ public class DatabaseManager : IDisposable
                 object result = await cmd.ExecuteScalarAsync();
                 if (result != null && result != DBNull.Value)
                 {
-                    return Convert.ToInt32(result);
+                    int internalId = Convert.ToInt32(result);
+                    _userIdCache.TryAdd((discordUserId, serverId), internalId);
+                    return internalId;
                 }
                 return -1; // Or throw an exception if user is expected to exist
             }
@@ -536,6 +549,7 @@ public class DatabaseManager : IDisposable
                 }
 
                 int rowsAffected = await cmd.ExecuteNonQueryAsync();
+                if (rowsAffected > 0) { Console.WriteLine($"Item {itemName} initialized"); }
                 return rowsAffected > 0;
             }
         }
@@ -549,9 +563,11 @@ public class DatabaseManager : IDisposable
     }
 
 
-    public async Task<bool> AddItemToUser(int userId, int masterItemId, string serverId) // Renamed for clarity
+    public async Task<bool> AddItemToUser(string discorduserId, int masterItemId, string serverId) // Renamed for clarity
     {
-        EnsureConnectionOpen(); 
+        EnsureConnectionOpen();
+        int userId = await GetDatabaseUserIdFromDiscordUserId(discorduserId, serverId);
+
         try
         {
             // 1. Fetch the master item details
@@ -572,7 +588,7 @@ public class DatabaseManager : IDisposable
             // Add in income if there is one
             if (itemDetails.IncomeSourceId.HasValue)
             {
-                await AddIncomeToUser(userId, itemDetails.IncomeSourceId.Value, serverId);
+                await AddIncomeToUser(discorduserId, itemDetails.IncomeSourceId.Value, serverId);
             }
 
             // 2. Prepare the INSERT statement for the 'inventories' table
@@ -599,6 +615,7 @@ public class DatabaseManager : IDisposable
                 cmd.Parameters.AddWithValue("@command", string.IsNullOrEmpty(itemDetails.Command) ? DBNull.Value : (object)itemDetails.Command);
 
                 int rowsAffected = await cmd.ExecuteNonQueryAsync();
+                if (rowsAffected > 0) { Console.WriteLine($"Item {masterItemId} added to user {userId}"); }
                 return rowsAffected > 0;
             }
         }
@@ -669,7 +686,11 @@ public class DatabaseManager : IDisposable
 
     public async Task<int> GetMasterIndexFromItemName(string itemName)
     {
-        EnsureConnectionOpen(); 
+        EnsureConnectionOpen();
+        if (_masterItemIdCache.TryGetValue(itemName, out int cachedId))
+        {
+            return cachedId;
+        }
         try
         {
             string sql = "SELECT item_id FROM master_items WHERE item_name = @itemName";
@@ -682,7 +703,9 @@ public class DatabaseManager : IDisposable
 
                 if (result != null && result != DBNull.Value)
                 {
-                    return Convert.ToInt32(result); // CORRECTED: Convert the result of master_item_id
+                    int masterId = Convert.ToInt32(result);
+                    _masterItemIdCache.TryAdd(itemName, masterId);
+                    return masterId;
                 }
                 else
                 {
@@ -724,6 +747,7 @@ public class DatabaseManager : IDisposable
                 else { cmd.Parameters.AddWithValue("@itemSourceId", itemSourceId); }
 
                 int rowsAffected = await cmd.ExecuteNonQueryAsync();
+                if (rowsAffected > 0) { Console.WriteLine($"Income {incomeName} intialized"); }
                 return rowsAffected > 0;
             }
         }
@@ -737,9 +761,11 @@ public class DatabaseManager : IDisposable
     }
 
 
-    public async Task<bool> AddIncomeToUser(int userId, int masterIncomeId, string serverId)
+    public async Task<bool> AddIncomeToUser(string discordUserId, int masterIncomeId, string serverId)
     {
-        EnsureConnectionOpen(); 
+        EnsureConnectionOpen();
+        int userId = await GetDatabaseUserIdFromDiscordUserId(discordUserId, serverId);
+
         try
         {
             // 1. Fetch the master income details
@@ -753,14 +779,14 @@ public class DatabaseManager : IDisposable
             Income incomeDetails = await ReadIncome(masterIncomeId); // Now returns Income?
             if (incomeDetails.IncomeId == 0) // Check for null
             {
-                Console.WriteLine($"Error: Master income with ID {masterIncomeId} not found. Cannot add to user.");
+                Console.WriteLine($"Error: Master income with ID {masterIncomeId} not found. Cannot add to user {userId}.");
                 return false;
             }
        
             // Adding in item for user if there is one
             if (incomeDetails.ItemSourceId.HasValue)
             {
-                await AddItemToUser(userId, incomeDetails.ItemSourceId.Value, serverId);
+                await AddItemToUser(discordUserId, incomeDetails.ItemSourceId.Value, serverId);
             }
 
             string insertSql = "INSERT INTO incomes (income_name, user_id, server_id, master_income_id, last_claimed_timestamp, amount, percent, item_source_id) " +
@@ -780,6 +806,7 @@ public class DatabaseManager : IDisposable
                 cmd.Parameters.AddWithValue("@itemSourceId", incomeDetails.ItemSourceId.HasValue ? incomeDetails.ItemSourceId.Value : DBNull.Value);
 
                 int rowsAffected = await cmd.ExecuteNonQueryAsync();
+                if (rowsAffected > 0) { Console.WriteLine($"Income {masterIncomeId} added to user {userId}"); }
                 return rowsAffected > 0;
             }
 
@@ -849,6 +876,11 @@ public class DatabaseManager : IDisposable
     public async Task<int> GetMasterIndexFromIncomeName(string incomeName)
     {
         EnsureConnectionOpen(); 
+        if (_masterIncomeIdCache.TryGetValue(incomeName, out int cachedId))
+        {
+            return cachedId;
+        }
+
         try
         {
             string sql = "SELECT income_id FROM master_incomes WHERE income_name = @incomeName";
@@ -860,7 +892,9 @@ public class DatabaseManager : IDisposable
 
                 if (result != null && result != DBNull.Value)
                 {
-                    return Convert.ToInt32(result);
+                    int masterId = Convert.ToInt32(result);
+                    _masterIncomeIdCache.TryAdd(incomeName, masterId);
+                    return masterId;
                 }
                 else
                 {
@@ -968,7 +1002,7 @@ namespace economyBot
             DatabaseManager dbManager = new DatabaseManager();
             await dbManager.ConnectAsync();
             await dbManager.ClearDatabaseForTestingAsync();
-            Console.WriteLine("------ TESTING BEGIN ------");
+            Console.WriteLine($" \r\n ------ TESTING BEGIN ------");
             
             // Start stopwatch
             Stopwatch stopwatch = new Stopwatch();
@@ -982,25 +1016,35 @@ namespace economyBot
             await dbManager.TestConnectionAsync();
             await dbManager.InsertServerAsync("1234", "The squad");
             await dbManager.InsertUserAsync("1234", "1234", "Matercan");
-            int userIndex = await dbManager.GetDatabaseUserIdFromDiscordUserId("1234", "1234");
+            await dbManager.InsertUserAsync("5000", "1234", "SleepingFox");
+
+            Console.WriteLine($"Users and servers intialized in {stopwatch.ElapsedMilliseconds}ms");
+            stopwatch.Restart();
 
             // Add in money
-            Console.WriteLine($"User 1234 balance: {await dbManager.GetUserBalancesAsync("1234", "1234")}");
             await dbManager.AddCashToUserAsync("1234", "1234", 100, DatabaseManager.TransactionType.income, "test");
             await dbManager.AddBankToUserAsync("1234", "1234", 1000, DatabaseManager.TransactionType.sell, "test");
-            Console.WriteLine($"User 1234 balance: {await dbManager.GetUserBalancesAsync("1234", "1234")}");
+
+            Console.WriteLine($"User 1234 earned income in {stopwatch.ElapsedMilliseconds}ms"); 
+            stopwatch.Restart();
 
             // Items
             await dbManager.InitializeItem(true, "test", 500, false);
             await dbManager.InitializeItem(false, "knife", 1000, false, command: "Stab");
             int itemIndex = await dbManager.GetMasterIndexFromItemName("test");
-            // await dbManager.AddItemToUser(userIndex, itemIndex, "1234");
-            // itemIndex = await dbManager.GetMasterIndexFromItemName("knife");
+            await dbManager.AddItemToUser("1234", itemIndex, "1234");
+            itemIndex = await dbManager.GetMasterIndexFromItemName("knife");
+
+            Console.WriteLine($"First batch of items initialized in {stopwatch.ElapsedMilliseconds}ms");
+            stopwatch.Restart();
 
             // Incomes
-            // await dbManager.InitializeIncome("crime", 5, true, new TimeSpan(0, 6, 0, 0), itemSourceId: itemIndex);
+            await dbManager.InitializeIncome("crime", 5, true, new TimeSpan(0, 6, 0, 0), itemSourceId: itemIndex);
             int incomeIndex = await dbManager.GetMasterIndexFromIncomeName("crime");
-            // await dbManager.AddIncomeToUser(userIndex, incomeIndex, "1234");
+            await dbManager.AddIncomeToUser("1234", incomeIndex, "1234");
+
+            Console.WriteLine($"First batch of incomes intialized in {stopwatch.ElapsedMilliseconds}ms");
+            stopwatch.Restart();
 
             // Everything test
             await dbManager.InitializeIncome("test1", 500, false, TimeSpan.Zero);
@@ -1015,11 +1059,18 @@ namespace economyBot
             await dbManager.InitializeItem(true, "test2", 1000, true, incomeSourceId: incomeIndex);
             itemIndex = await dbManager.GetMasterIndexFromItemName("test2");
 
-            await dbManager.AddItemToUser(userIndex, itemIndex, "1234");
+            Console.WriteLine($"Income and item tree initialized in {stopwatch.ElapsedMilliseconds}ms");
+            stopwatch.Restart();
 
-            // End stopwatch
+            await dbManager.AddItemToUser("1234", itemIndex, "1234");
+            Console.WriteLine($"Items and incomes added to user 1234 in {stopwatch.ElapsedMilliseconds}ms");
+            stopwatch.Restart();
+
+            await dbManager.AddItemToUser("5000", itemIndex, "1234");
+            Console.WriteLine($"Items and incomes added to user 5000 in {stopwatch.ElapsedMilliseconds}ms");
             stopwatch.Stop();
-            Console.WriteLine($"Tasks completed in {stopwatch.ElapsedMilliseconds}ms");
+
+
         }
     }
 }
