@@ -1,5 +1,6 @@
 ﻿using MySql.Data.MySqlClient;
-
+using System.Numerics;
+using System.Diagnostics;
 
 public class DatabaseManager
 {
@@ -17,7 +18,6 @@ public class DatabaseManager
     
     public struct Item 
     {
-        // Use properties (PascalCase)
         public int ItemId { get; set; }
         public string ItemName { get; set; }
         public long Price { get; set; }
@@ -36,6 +36,26 @@ public class DatabaseManager
             InInventory = inInventory;
             Command = command;
             IncomeSourceId = incomeSourceId;
+        }
+    }
+
+    public struct Income
+    {
+        public int IncomeId { get; set; }
+        public string IncomeName { get; set; }
+        public long Amount { get; set; }
+        public bool Percent { get; set; }
+        public TimeSpan Cooldown { get; set; }
+        public int? ItemSourceId { get; set; }
+
+        public Income(int incomeId, string incomeName, long amount, bool percent, TimeSpan cooldown, int? itemSourceId)
+        {
+            IncomeId = incomeId;
+            IncomeName = incomeName;
+            Amount = amount;
+            Percent = percent;
+            Cooldown = cooldown;
+            ItemSourceId = itemSourceId;
         }
     }
                 
@@ -418,8 +438,6 @@ public class DatabaseManager
             {
                 await connection.OpenAsync();
 
-                // CORRECTED SQL: Fixed typo in 'in_inventory' column name.
-                // Also, ensure 'item_id' is NOT in the column list if it's AUTO_INCREMENT.
                 string insertSql = "INSERT INTO master_items (one_time, income_source_id, command, item_name, price, in_inventory) " +
                                    "VALUES (@oneTime, @incomeSourceId, @command, @itemName, @price, @inInventory)";
 
@@ -474,7 +492,6 @@ public class DatabaseManager
                 await connection.OpenAsync();
 
                 // 1. Fetch the master item details
-                //
                 
                 if (masterItemId == -1)
                 {
@@ -487,6 +504,12 @@ public class DatabaseManager
                 {
                     Console.WriteLine($"Error: Master Item with ID {masterItemId} not found. Cannot add to inventory.");
                     return false;
+                }
+                
+                // Add in income if there is one
+                if (itemDetails.IncomeSourceId.HasValue)
+                {
+                    await AddIncomeToUser(userId, itemDetails.IncomeSourceId.Value, serverId);
                 }
 
                 // 2. Prepare the INSERT statement for the 'inventories' table
@@ -507,7 +530,7 @@ public class DatabaseManager
                     cmd.Parameters.AddWithValue("@inInventory", itemDetails.InInventory); // Consider if this should always be true for a newly added item
 
                     // Handle nullable IncomeSourceId
-                    cmd.Parameters.AddWithValue("@incomeSourceId", itemDetails.IncomeSourceId.HasValue ? itemDetails.IncomeSourceId.Value : DBNull.Value);
+                    cmd.Parameters.AddWithValue("@incomeSourceId", itemDetails.IncomeSourceId.HasValue ? itemDetails.IncomeSourceId.Value : null);
 
                     // Handle nullable Command
                     cmd.Parameters.AddWithValue("@command", string.IsNullOrEmpty(itemDetails.Command) ? DBNull.Value : (object)itemDetails.Command);
@@ -532,7 +555,7 @@ public class DatabaseManager
             try
             {
                 await connection.OpenAsync();
-                // CORRECTED SQL: Added 'item_id' to the SELECT list
+                // SQL: Select all necessary columns, including item_id
                 string sql = "SELECT item_id, price, one_time, in_inventory, item_name, income_source_id, command FROM master_items WHERE item_id = @itemId";
                 using (MySqlCommand cmd = new MySqlCommand(sql, connection))
                 {
@@ -567,7 +590,7 @@ public class DatabaseManager
                         else
                         {
                             Console.WriteLine($"Item with ID {itemId} not found in master_items.");
-                            return new Item();
+                            return new Item(); // Return null if item not found
                         }
                     }
                 }
@@ -576,70 +599,12 @@ public class DatabaseManager
             {
                 Console.WriteLine($"Error reading item {itemId} from master_items: {ex.Message}");
                 Console.WriteLine(ex.ToString());
-                return new Item();
+                return new Item(); // Return null on error
             }
         }
     }
 
-    public async Task<bool> ClearDatabaseForTestingAsync(bool resetAutoIncrement = true)
-    {
-        // Define the order of tables to clear based on foreign key dependencies
-        // Child tables first, then parent tables.
-        List<string> tablesToClear = new List<string>
-        {
-            "inventories",   // References users, master_items
-            "transactions",  // References users, servers
-            "users",         // References servers
-            "master_items",  // No outgoing FKs to these tables
-            "servers",        // No outgoing FKs to these tables
-            "incomes"
-        };
-
-        using (MySqlConnection connection = new MySqlConnection(connectionString))
-        {
-            await connection.OpenAsync();
-            MySqlTransaction transaction = null;
-
-            try
-            {
-                transaction = connection.BeginTransaction();
-                Console.WriteLine("\n--- Clearing Database for Testing ---");
-
-                foreach (string tableName in tablesToClear)
-                {
-                    string deleteSql = $"DELETE FROM `{tableName}`"; // Use backticks for table names
-                    Console.WriteLine($"Deleting from table: {tableName}...");
-                    using (MySqlCommand cmd = new MySqlCommand(deleteSql, connection, transaction))
-                    {
-                        await cmd.ExecuteNonQueryAsync();
-                    }
-
-                    if (resetAutoIncrement)
-                    {
-                        // Reset AUTO_INCREMENT for tables that have one
-                        // This is a separate command, often executed after DELETE
-                        string resetAutoIncrementSql = $"ALTER TABLE `{tableName}` AUTO_INCREMENT = 1";
-                        Console.WriteLine($"Resetting AUTO_INCREMENT for {tableName}...");
-                        using (MySqlCommand cmd = new MySqlCommand(resetAutoIncrementSql, connection, transaction))
-                        {
-                            await cmd.ExecuteNonQueryAsync();
-                        }
-                    }
-                }
-
-                transaction.Commit();
-                Console.WriteLine("Database cleared successfully for testing!");
-                return true;
-            }
-            catch (MySqlException ex)
-            {
-                Console.WriteLine($"Error clearing database: {ex.Message}");
-                Console.WriteLine(ex.ToString());
-                transaction?.Rollback(); // Rollback all changes on error
-                return false;
-            }
-        }
-    }
+    
 
     public async Task<int> GetMasterIndexFromItemName(string itemName)
     {
@@ -648,7 +613,6 @@ public class DatabaseManager
             try
             {
                 await connection.OpenAsync();
-                // CORRECTED: Select item_id from your master items table (e.g., 'items_master')
                 string sql = "SELECT item_id FROM master_items WHERE item_name = @itemName";
 
                 using (MySqlCommand cmd = new MySqlCommand(sql, connection))
@@ -675,6 +639,275 @@ public class DatabaseManager
             }
         }
     }
+    
+    public async Task<bool> InitializeIncome(
+        string incomeName,
+        long amount,
+        bool percent,
+        TimeSpan cooldown, // Keep TimeSpan for C# logic
+        int itemSourceId = -1
+    )
+    {
+        using (MySqlConnection connection = new MySqlConnection(connectionString))
+        {
+            try
+            {
+                await connection.OpenAsync();
+
+                string inserSql = "INSERT INTO master_incomes (cooldown, income_name, percent, amount, item_source_id) " +
+                                  "VALUES (@cooldownSeconds, @incomeName, @percent, @amount, @itemSourceId)"; // Use @cooldownSeconds
+
+                using (MySqlCommand cmd = new MySqlCommand(inserSql, connection))
+                {
+                    cmd.Parameters.AddWithValue("@incomeName", incomeName);
+                    cmd.Parameters.AddWithValue("@amount", amount);
+                    cmd.Parameters.AddWithValue("@percent", percent);
+                    cmd.Parameters.AddWithValue("@cooldownSeconds", (long)cooldown.TotalSeconds); // <--- Convert TimeSpan to total seconds (long)
+
+                    if (itemSourceId == -1) { cmd.Parameters.AddWithValue("@itemSourceId", DBNull.Value); }
+                    else { cmd.Parameters.AddWithValue("@itemSourceId", itemSourceId); }
+
+                    int rowsAffected = await cmd.ExecuteNonQueryAsync();
+                    return rowsAffected > 0;
+                }
+            }
+            catch (MySqlException ex)
+            {
+                Console.WriteLine($"Error initializing income: {ex.Message}");
+                Console.WriteLine(ex.ToString());
+                return false;
+            }
+        }
+    }
+
+
+    public async Task<bool> AddIncomeToUser(int userId, int masterIncomeId, string serverId)
+    {
+        using (MySqlConnection connection = new MySqlConnection(connectionString))
+        {
+            try
+            {
+                await connection.OpenAsync();
+
+                // 1. Fetch the master income details
+                
+                if (masterIncomeId == -1)
+                {
+                    Console.WriteLine($"Error: Master income ID negative when adding to {userId} of {serverId}");
+                    return false;
+                }
+
+                Income incomeDetails = await ReadIncome(masterIncomeId); // Now returns Income?
+                if (incomeDetails.IncomeId == 0) // Check for null
+                {
+                    Console.WriteLine($"Error: Master income with ID {masterIncomeId} not found. Cannot add to user.");
+                    return false;
+                }
+           
+                // Adding in item for user if there is one
+                if (incomeDetails.ItemSourceId.HasValue)
+                {
+                    await AddItemToUser(userId, incomeDetails.ItemSourceId.Value, serverId);
+                }
+
+                string insertSql = "INSERT INTO incomes (income_name, user_id, server_id, master_income_id, last_claimed_timestamp, amount, percent, item_source_id) " +
+                                   "VALUES (@incomeName, @userId, @serverId, @masterIncomeRefId, @lastClaimedTimestamp, @amount, @percent, @itemSourceId)";
+
+                using (MySqlCommand cmd = new MySqlCommand(insertSql, connection))
+                {
+                    cmd.Parameters.AddWithValue("@incomeName", incomeDetails.IncomeName); // From master details
+                    cmd.Parameters.AddWithValue("@userId", userId);
+                    cmd.Parameters.AddWithValue("@serverId", serverId);
+                    cmd.Parameters.AddWithValue("@masterIncomeRefId", masterIncomeId);
+                    cmd.Parameters.AddWithValue("@lastClaimedTimestamp", DBNull.Value); // New income, no claim yet
+                    cmd.Parameters.AddWithValue("@amount", incomeDetails.Amount); // From master details
+                    cmd.Parameters.AddWithValue("@percent", incomeDetails.Percent); // From master details
+
+                    // Handle nullable ItemSourceId
+                    cmd.Parameters.AddWithValue("@itemSourceId", incomeDetails.ItemSourceId.HasValue ? incomeDetails.ItemSourceId.Value : DBNull.Value);
+
+                    int rowsAffected = await cmd.ExecuteNonQueryAsync();
+                    return rowsAffected > 0;
+                }
+
+
+            }
+            catch (MySqlException ex)
+            {
+                Console.WriteLine($"Error when adding income {masterIncomeId} to user {userId} of {serverId}: {ex.Message}");
+                Console.WriteLine(ex.ToString());
+                return false;
+            }
+        }
+    }
+
+    public async Task<Income> ReadIncome(int incomeId)
+    {
+        using (MySqlConnection connection = new MySqlConnection(connectionString))
+        {
+            try
+            {
+                await connection.OpenAsync();
+                string sql = "SELECT income_id, cooldown, income_name, percent, amount, item_source_id FROM master_incomes WHERE income_id = @incomeId";
+                using (MySqlCommand cmd = new MySqlCommand(sql, connection))
+                {
+                    cmd.Parameters.AddWithValue("@incomeId", incomeId);
+
+                    using (MySqlDataReader reader = (MySqlDataReader)await cmd.ExecuteReaderAsync())
+                    {
+                        if (reader.Read())
+                        {
+                            // Get item nullable item source
+                            int? itemSourceId;
+                            int itemSourceIdIndex = 5; // Index on database is 6
+                            if (reader.IsDBNull(itemSourceIdIndex)) { itemSourceId = null; }
+                            else { itemSourceId = reader.GetInt32("item_source_id"); }
+
+                            // Read cooldown as long (total seconds) and convert to TimeSpan
+                            long cooldownSeconds = reader.GetInt64("cooldown"); // <--- Read as long
+                            TimeSpan cooldown = TimeSpan.FromSeconds(cooldownSeconds); // <--- Convert to TimeSpan
+
+                            return new Income(
+                                incomeId: reader.GetInt32("income_id"),
+                                incomeName: reader.GetString("income_name"),
+                                amount: reader.GetInt64("amount"),
+                                percent: reader.GetBoolean("percent"),
+                                cooldown: cooldown,
+                                itemSourceId: itemSourceId
+                            );
+
+                        }
+                        else
+                        {
+                            Console.WriteLine($"Reading error reading income {incomeId}");
+                            return new Income();
+                        }
+                    }
+                }
+            }
+            catch (MySqlException ex)
+            {
+                Console.WriteLine($"Error reading income {incomeId}: {ex.Message}");
+                Console.WriteLine(ex.ToString());
+                return new Income();
+            }
+            
+        }
+    }
+
+    public async Task<int> GetMasterIndexFromIncomeName(string incomeName)
+    {
+        using (MySqlConnection connection = new MySqlConnection(connectionString))
+        {
+            try
+            {
+                await connection.OpenAsync();
+                string sql = "SELECT income_id FROM master_incomes WHERE income_name = @incomeName";
+
+                using (MySqlCommand cmd = new MySqlCommand(sql, connection))
+                {
+                    cmd.Parameters.AddWithValue("@incomeName", incomeName);
+                    object result = await cmd.ExecuteScalarAsync();
+
+                    if (result != null && result != DBNull.Value)
+                    {
+                        return Convert.ToInt32(result);
+                    }
+                    else
+                    {
+                        return -1;
+                    }
+                }
+            }
+            catch (MySqlException ex)
+            {
+                Console.WriteLine($"Error retrieving master income Id for '{incomeName}': {ex.Message}");
+                Console.WriteLine(ex.ToString());
+                return -1;
+            }
+        }
+    }
+    
+
+    public async Task<bool> ClearDatabaseForTestingAsync(bool resetAutoIncrement = true)
+    {
+        // Define ALL tables in your database that you want to clear.
+        // The order no longer strictly matters because FK checks are disabled,
+        // but a logical order (children first) is still good practice.
+        List<string> tablesToClear = new List<string>
+        {
+            "inventories",
+            "transactions",
+            "users",
+            "master_items",
+            "incomes", // Assuming this is your user-specific income table
+            "master_incomes", // Assuming this is your global income definition table
+            "servers"
+        };
+
+        using (MySqlConnection connection = new MySqlConnection(connectionString))
+        {
+            await connection.OpenAsync();
+            MySqlTransaction transaction = null;
+
+            try
+            {
+                // Start a transaction for the entire clear operation
+                transaction = connection.BeginTransaction();
+                Console.WriteLine("\n--- Clearing Database for Testing ---");
+
+                // 1. Temporarily disable foreign key checks
+                Console.WriteLine("Disabling foreign key checks...");
+                using (MySqlCommand disableFkCmd = new MySqlCommand("SET FOREIGN_KEY_CHECKS = 0;", connection, transaction))
+                {
+                    await disableFkCmd.ExecuteNonQueryAsync();
+                }
+
+                // 2. Perform deletions
+                foreach (string tableName in tablesToClear)
+                {
+                    string deleteSql = $"DELETE FROM `{tableName}`"; // Use backticks for table names
+                    Console.WriteLine($"Deleting from table: {tableName}...");
+                    using (MySqlCommand cmd = new MySqlCommand(deleteSql, connection, transaction))
+                    {
+                        await cmd.ExecuteNonQueryAsync();
+                    }
+
+                    if (resetAutoIncrement)
+                    {
+                        string resetAutoIncrementSql = $"ALTER TABLE `{tableName}` AUTO_INCREMENT = 1";
+                        Console.WriteLine($"Resetting AUTO_INCREMENT for {tableName}...");
+                        using (MySqlCommand cmd = new MySqlCommand(resetAutoIncrementSql, connection, transaction))
+                        {
+                            await cmd.ExecuteNonQueryAsync();
+                        }
+                    }
+                }
+
+                // 3. Re-enable foreign key checks
+                Console.WriteLine("Re-enabling foreign key checks...");
+                using (MySqlCommand enableFkCmd = new MySqlCommand("SET FOREIGN_KEY_CHECKS = 1;", connection, transaction))
+                {
+                    await enableFkCmd.ExecuteNonQueryAsync();
+                }
+
+                // Commit the entire transaction
+                transaction.Commit();
+                Console.WriteLine("Database cleared successfully for testing!");
+                return true;
+            }
+            catch (MySqlException ex)
+            {
+                Console.WriteLine($"Error clearing database: {ex.Message}");
+                Console.WriteLine(ex.ToString());
+                // Rollback the transaction on error, which will also undo the SET FOREIGN_KEY_CHECKS = 0
+                transaction?.Rollback();
+                // IMPORTANT: If rollback fails to re-enable FK checks, you might need to manually run SET FOREIGN_KEY_CHECKS = 1; in phpMyAdmin
+                Console.WriteLine("WARNING: Foreign key checks might still be disabled if rollback failed. Check phpMyAdmin.");
+                return false;
+            }
+        }
+    }
 
 }
 
@@ -689,6 +922,10 @@ namespace economyBot
             DatabaseManager dbManager = new DatabaseManager();
             await dbManager.ClearDatabaseForTestingAsync();
             Console.WriteLine("------ TESTING BEGIN ------");
+            
+            // Start stopwatch
+            Stopwatch stopwatch = new Stopwatch();
+            stopwatch.Start();
 
             // Ensure global economy and user are set up
             await dbManager.InsertServerAsync("1", "Global Economy");
@@ -698,6 +935,7 @@ namespace economyBot
             await dbManager.TestConnectionAsync();
             await dbManager.InsertServerAsync("1234", "The squad");
             await dbManager.InsertUserAsync("1234", "1234", "Matercan");
+            int userIndex = await dbManager.GetDatabaseUserIdFromDiscordUserId("1234", "1234");
 
             // Add in money
             Console.WriteLine($"User 1234 balance: {await dbManager.GetUserBalancesAsync("1234", "1234")}");
@@ -707,8 +945,34 @@ namespace economyBot
 
             // Items
             await dbManager.InitializeItem(true, "test", 500, false);
+            await dbManager.InitializeItem(false, "knife", 1000, false, command: "Stab");
             int itemIndex = await dbManager.GetMasterIndexFromItemName("test");
-            await dbManager.AddItemToUser(await dbManager.GetDatabaseUserIdFromDiscordUserId("1234", "1234"), itemIndex, "1234");
+            // await dbManager.AddItemToUser(userIndex, itemIndex, "1234");
+            // itemIndex = await dbManager.GetMasterIndexFromItemName("knife");
+
+            // Incomes
+            // await dbManager.InitializeIncome("crime", 5, true, new TimeSpan(0, 6, 0, 0), itemSourceId: itemIndex);
+            int incomeIndex = await dbManager.GetMasterIndexFromIncomeName("crime");
+            // await dbManager.AddIncomeToUser(userIndex, incomeIndex, "1234");
+
+            // Everything test
+            await dbManager.InitializeIncome("test1", 500, false, TimeSpan.Zero);
+            incomeIndex = await dbManager.GetMasterIndexFromIncomeName("test1");
+            
+            await dbManager.InitializeItem(true, "test1", 500, false, incomeSourceId: incomeIndex);
+            itemIndex = await dbManager.GetMasterIndexFromItemName("test1");
+
+            await dbManager.InitializeIncome("test2", 5, true, TimeSpan.Zero, itemSourceId: itemIndex);
+            incomeIndex = await dbManager.GetMasterIndexFromIncomeName("test2");
+
+            await dbManager.InitializeItem(true, "test2", 1000, true, incomeSourceId: incomeIndex);
+            itemIndex = await dbManager.GetMasterIndexFromItemName("test2");
+
+            await dbManager.AddItemToUser(userIndex, itemIndex, "1234");
+
+            // End stopwatch
+            stopwatch.Stop();
+            Console.WriteLine($"Tasks completed in {stopwatch.ElapsedMilliseconds}ms");
         }
     }
 }
