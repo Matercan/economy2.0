@@ -7,7 +7,7 @@
 
 # NuGet packages
 *.nupkg
-# The packages folder (if you're using packages.config, though modern .NET uses obj/project.assets.json)
+# The packages folder 
 packages/
 
 # Other common generated files
@@ -19,12 +19,16 @@ packages/
 *.bak
 *.scc
 
-# Rider IDE files (if you or collaborators use Rider)
+# Rider IDE files 
 .idea/
 *.iml
 
-# VS Code files (if you or collaborators use VS Code)
+# VS Code files 
 .vscode/
 
-# neovim
+# Neovim
 *.swp
+
+# Cmake
+**/CMakeFiles/
+build/
